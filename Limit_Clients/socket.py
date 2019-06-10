@@ -73,6 +73,7 @@ black_list = {}
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
+PYTHON_VERSION = sys.version_info[0]
 send_timeout = recv_timeout
 limit_all_clients = False
 
@@ -120,16 +121,16 @@ def new_accept(orgin_method, self, *args, **kwds):
             self._all_client_list[server_addrs].update(client_list)
             if set_close_timeout:
                 # set recv_timeout and send_timeout , struct.pack("II", some_num_secs, some_num_microsecs)
-                self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("II", recv_timeout, 0))
-                self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("II", send_timeout, 0))  
+                self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("LL", recv_timeout, 0))
+                self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("LL", send_timeout, 0))
             return return_value
         else:
             for k,v in self._all_client_list[server_addrs].copy().items():
                 last_up_time = v["last_up_time"]
                 if time.time() - last_up_time > recvfrom_timeout and v["client_num"] < 1:
                     if set_close_timeout:
-                        self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("II", recv_timeout, 0))
-                        self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("II", send_timeout, 0))
+                        self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("LL", recv_timeout, 0))
+                        self_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("LL", send_timeout, 0))
                     logging.info("[socket] remove the client %s" % (k))
                     del client_list[k]
                     if client_list.get(client_ip, None) == None:
@@ -196,29 +197,28 @@ def new_bind(orgin_method, self, *args, **kwds):
             new_self_method(self, 'accept', new_accept)
             if self.type == socket.SOCK_DGRAM:
                 new_self_method(self, 'recvfrom', new_recvfrom)
-    orgin_method(self, *args, **kwds)
+    if PYTHON_VERSION >= 3:
+        orgin_method(*args, **kwds)
+    else:
+        orgin_method(self, *args, **kwds)
     
 
 
 # 自定义 socket 类，可以自定义实例方法或属性。
+# 为 accept 生成的socket对象创建一个单独的类，目的是给其动态地绑定 close 方法。
 class new_socket(socket.socket):
 
     def __init__(self, *args, **kwds):
         super(new_socket, self).__init__(*args, **kwds)
-
-
-# 为 accept 生成的socket对象创建一个单独的类，目的是给其动态地绑定 close 方法。
-class new_client_socket(socket.socket):
-
-    def __init__(self, *args, **kwds):
-        super(new_client_socket, self).__init__(*args, **kwds)
+        if PYTHON_VERSION >= 3:
+            new_class_method(self, 'bind', new_bind)
 
     def close(self ,*args, **kwds):
-        super(new_client_socket, self).__init__(*args, **kwds)
-
+        super(new_socket, self).__init__(*args, **kwds)
+        
     # 自定义 close 方法，让其在关闭的时候从列表中清理掉自身的 socket 或 ip。
     def new_close(self, *args, **kwds):
-        addr, port = self.getpeername()
+        addr, port = self.getpeername()[0:2]
         server_addrs = self._server_addrs
         client_list = self._all_client_list[server_addrs]
         if client_list.get(addr, None) != None:
@@ -230,14 +230,16 @@ class new_client_socket(socket.socket):
                 client_list[addr]["client_num"] -= 1
                 logging.debug("[socket] close the client socket %s:%d" % (addr, port))
             self._all_client_list[server_addrs].update(client_list)
-        return super(new_client_socket, self).close(*args, **kwds)
+        return super(new_socket, self).close(*args, **kwds)
+            
 
 
 # 添加类属性， 此属性是全局的，所有socket对象都共享此属性。
 setattr(socket.socket, '_all_client_list', {})
 setattr(socket.socket, 'last_log_time', [0])
 
-new_class_method(socket.socket, 'bind', new_bind)
-if not sys.version_info[0] >= 3:
-    socket._socketobject = new_client_socket
+# python2
+if not PYTHON_VERSION >= 3:
+    new_class_method(socket.socket, 'bind', new_bind)
+    socket._socketobject = new_socket
 socket.socket = new_socket
